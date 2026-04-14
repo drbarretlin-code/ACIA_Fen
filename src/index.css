@@ -1,0 +1,69 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@media print {
+  @page {
+    size: A4 landscape;
+    margin: 10mm;
+  }
+  body { 
+    background: white !important; 
+    color: black !important; 
+    font-size: 9pt !important;
+  }
+  .no-print { display: none !important; }
+  .print-expand { 
+    width: 100% !important; 
+    max-width: none !important; 
+    box-shadow: none !important; 
+    border: none !important; 
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .overflow-auto { overflow: visible !important; }
+  .h-\[calc\(100vh-12rem\)\] { height: auto !important; }
+  
+  table { 
+    width: 100% !important;
+    table-layout: fixed !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto; 
+  }
+  th, td { 
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    white-space: normal !important;
+    padding: 4px !important;
+    font-size: 8pt !important;
+    border: 1px solid #e2e8f0 !important;
+  }
+  tr { page-break-inside: avoid; page-break-after: auto; }
+  
+  /* Specific column width adjustments for print */
+  th:nth-child(1), td:nth-child(1) { width: 40px !important; } /* No. */
+  th:nth-child(2), td:nth-child(2) { width: 15% !important; } /* Theme */
+  th:nth-child(3), td:nth-child(3) { width: 20% !important; } /* Topics */
+  th:nth-child(4), td:nth-child(4) { width: 12% !important; } /* Date/Loc */
+  th:nth-child(5), td:nth-child(5) { width: 12% !important; } /* Deadline/Type */
+  th:nth-child(6), td:nth-child(6) { width: 20% !important; } /* Analysis */
+  th:nth-child(7), td:nth-child(7) { width: 15% !important; } /* URL */
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 10px;
+}
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
