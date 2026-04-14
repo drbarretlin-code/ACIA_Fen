@@ -1,0 +1,101 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: invalid_links
+    // Document ID: auto-generated
+    // Fields:
+    //   - url: string (required) - The invalid URL.
+    //   - theme: string (required) - The conference theme.
+    //   - reportedAt: timestamp (required) - When it was reported.
+    //   - reporterUid: string (required) - The UID of the user who reported it.
+
+    match /invalid_links/{linkId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+                    request.resource.data.url is string && 
+                    request.resource.data.theme is string &&
+                    request.resource.data.reportedAt is timestamp &&
+                    request.resource.data.reporterUid == request.auth.uid;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function uidUnchanged() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == resource.data.userId;
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidEmailList(emails) {
+      return emails is list && emails.size() <= 10 && (emails.size() == 0 || isValidEmail(emails[0])); // Simplified check for array elements due to rules limitations, ideally we'd check all but we can't easily loop. We'll enforce size.
+    }
+
+    function isValidStringList(listData, maxSize) {
+      return listData is list && listData.size() <= maxSize;
+    }
+
+    function isValidSubscription(data) {
+      let allowedFields = ['userId', 'name', 'startDate', 'endDate', 'locations', 'field', 'expandedFields', 'emails', 'frequency', 'isActive', 'createdAt', 'lastRun', 'sendTime', 'subscriptionEndDate'];
+      
+      return hasOnlyAllowedFields(allowedFields) &&
+             data.userId is string && data.userId.size() > 0 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.startDate is string && data.startDate.size() <= 20 &&
+             data.endDate is string && data.endDate.size() <= 20 &&
+             isValidStringList(data.locations, 50) &&
+             (!('expandedFields' in data) || isValidStringList(data.expandedFields, 10)) &&
+             data.field is string && data.field.size() > 0 && data.field.size() <= 100 &&
+             isValidStringList(data.emails, 10) &&
+             data.frequency in ['daily', 'weekly', 'monthly'] &&
+             data.sendTime is string && data.sendTime.size() > 0 &&
+             data.subscriptionEndDate is string &&
+             data.isActive is bool &&
+             data.createdAt is timestamp &&
+             (!('lastRun' in data) || data.lastRun is timestamp);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /subscriptions/{subscriptionId} {
+      allow read: if isAuthenticated() && isOwner(resource.data.userId);
+      allow create: if isAuthenticated() && 
+                    isValidSubscription(request.resource.data) && 
+                    isOwner(request.resource.data.userId) &&
+                    uidUnchanged();
+      allow update: if isAuthenticated() && 
+                    isValidSubscription(request.resource.data) && 
+                    isOwner(resource.data.userId) &&
+                    uidNotModified() &&
+                    request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isAuthenticated() && isOwner(resource.data.userId);
+    }
+  }
+}

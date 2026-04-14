@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "Subscription": {
+      "title": "Subscription",
+      "description": "A scheduled search task for academic conferences.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the user who created the subscription."
+        },
+        "name": {
+          "type": "string",
+          "description": "The name of the subscription task."
+        },
+        "startDate": {
+          "type": "string",
+          "description": "The start date for the search range."
+        },
+        "endDate": {
+          "type": "string",
+          "description": "The end date for the search range."
+        },
+        "locations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The selected locations."
+        },
+        "field": {
+          "type": "string",
+          "description": "The field of study."
+        },
+        "expandedFields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "AI expanded sub-fields."
+        },
+        "emails": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of email addresses to send the results to."
+        },
+        "frequency": {
+          "type": "string",
+          "enum": ["daily", "weekly", "monthly"],
+          "description": "How often the search should run."
+        },
+        "sendTime": {
+          "type": "string",
+          "description": "The time of day to send the email."
+        },
+        "subscriptionEndDate": {
+          "type": "string",
+          "description": "When the subscription expires."
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the subscription is currently active."
+        },
+        "createdAt": {
+          "type": "timestamp",
+          "description": "When the subscription was created."
+        },
+        "lastRun": {
+          "type": "timestamp",
+          "description": "When the subscription was last executed."
+        }
+      },
+      "required": ["userId", "name", "startDate", "endDate", "locations", "field", "emails", "frequency", "isActive", "createdAt", "sendTime", "subscriptionEndDate"]
+    }
+  },
+  "firestore": {
+    "/subscriptions/{subscriptionId}": {
+      "schema": {
+        "$ref": "#/entities/Subscription"
+      },
+      "description": "Stores user subscription tasks for automated conference searches."
+    }
+  }
+}

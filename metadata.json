@@ -1,0 +1,5 @@
+{
+  "name": "ACIA",
+  "description": "即時檢索全球會議資訊，並嚴格執行防範掠奪性期刊的真偽鑑識與網址有效性驗證。",
+  "requestFramePermissions": []
+}
