@@ -604,10 +604,11 @@ export default function App() {
                   deadline: { type: "STRING", description: "投稿截止日" },
                   presentationType: { type: "STRING", description: "發佈形態 (口頭 / 海報 / 其他)" },
                   predatoryAnalysis: { type: "STRING", description: "掠奪性期刊分析 (含鑑識說明)" },
-                  url: { type: "STRING", description: "會議連結網址 (需為 100% 準確之深層連結)" },
-                  originalTextQuote: { type: "STRING", description: "支持論點的網頁原文字句" }
+                  url: { type: "STRING", description: "會議官方網站完整 URL（必須從 Google Search 搜尋結果中直接複製，不得自行組合或推測）" },
+                  originalTextQuote: { type: "STRING", description: "支持論點的網頁原文字句" },
+                  urlSource: { type: "STRING", description: "找到此 URL 的搜尋來源摘要，例如：搜尋結果標題、搜尋關鍵字、來源網域。若為推測則填入 'inferred'。" }
                 },
-                required: ["theme", "topics", "date", "location", "deadline", "presentationType", "predatoryAnalysis", "url", "originalTextQuote"]
+                required: ["theme", "topics", "date", "location", "deadline", "presentationType", "predatoryAnalysis", "url", "originalTextQuote", "urlSource"]
               }
             };
 
@@ -708,8 +709,8 @@ export default function App() {
     }
   };
 
+  // verifyLinks: 僅依賴後端 HTTP 驗證，不再使用無搜尋工具的 AI 猜測
   const verifyLinks = async (conferences: Conference[]) => {
-    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     const urls = conferences.map(c => c.url);
     try {
       const response = await fetch('/api/utils/verify-links', {
@@ -720,89 +721,95 @@ export default function App() {
       
       if (response.ok) {
         const resultsMap = await response.json();
-        
-        // Process sequentially to avoid rate limits
         for (const c of conferences) {
-          const isValid = resultsMap[c.url];
-          if (!isValid) {
-            setResults(prev => prev.map(item => item.theme === c.theme ? { ...item, urlStatus: 'invalid' as const } : item));
+          const isReachable = resultsMap[c.url];
+          if (isReachable) {
+            // HTTP 可連通 → 標記為有效，不再用 AI 猜內容
+            setResults(prev => prev.map(item =>
+              item.theme === c.theme ? { ...item, urlStatus: 'valid' as const } : item
+            ));
+          } else {
+            // HTTP 不可連通 → 標記 fixing 狀態後執行自動修復
+            setResults(prev => prev.map(item =>
+              item.theme === c.theme ? { ...item, urlStatus: 'fixing' as const } : item
+            ));
             fixLink(c);
-            continue;
           }
-          
-          const checkPrompt = `Check if the webpage at ${c.url} is the official website for the academic conference "${c.theme}". Return "true" or "false".`;
-          let success = false;
-          let retryCount = 0;
-
-          while (retryCount < 3 && !success) {
-            try {
-              const checkRes = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
-                contents: checkPrompt
-              });
-
-              if (checkRes && checkRes.text) {
-                const isContentValid = checkRes.text.trim().toLowerCase() === 'true';
-                setResults(prev => prev.map(item => item.theme === c.theme ? { ...item, urlStatus: isContentValid ? 'valid' as const : 'invalid' as const } : item));
-                if (!isContentValid) fixLink(c);
-                success = true;
-              } else {
-                success = true; // Give up
-              }
-            } catch (e: any) {
-              if (e.message && (e.message.includes('429') || e.message.includes('RESOURCE_EXHAUSTED'))) {
-                await sleep(10000 * (retryCount + 1));
-                retryCount++;
-              } else {
-                retryCount++;
-                await sleep(2000);
-              }
-            }
-          }
-          await sleep(500); // Small gap
         }
+      } else {
+        // 後端驗證服務不可用時，統一標記為 pending（保留連結可點擊）
+        console.warn('verify-links service unavailable, skipping validation');
+        setResults(prev => prev.map(item =>
+          conferences.some(c => c.theme === item.theme)
+            ? { ...item, urlStatus: 'pending' as const }
+            : item
+        ));
       }
     } catch (e) {
       console.error('Link verification failed', e);
     }
   };
 
+  // fixLink: 使用 Google Search 工具尋找正確 URL，修復後重新做後端 HTTP 驗證
   const fixLink = async (conference: Conference) => {
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
     let retryCount = 0;
+
     while (retryCount < 3) {
       try {
-        const prompt = `Find the correct official website URL for the academic conference "${conference.theme}". The previous URL "${conference.url}" is broken. Return ONLY the valid URL as a plain string, nothing else.`;
-        
+        const prompt = `You are an academic conference URL locator. The URL "${conference.url}" for the conference "${conference.theme}" is unreachable. Use Google Search to find the current official website. Return ONLY the raw URL string, no markdown, no explanation.`;
+
         const response = await ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: prompt,
           config: {
+            tools: [{ googleSearch: {} }],
             temperature: 0.1
           }
         });
-        
+
         if (response && response.text) {
-          const newUrl = response.text.trim() || conference.url;
-          
+          // 從回應中提取 URL（過濾 markdown 格式殘留）
+          const rawText = response.text.trim();
+          const urlMatch = rawText.match(/https?:\/\/[^\s"'<>)]+/);
+          const newUrl = urlMatch ? urlMatch[0] : null;
+
           if (newUrl && newUrl !== conference.url) {
-            setResults(prev => prev.map(c => {
-              if (c.theme === conference.theme) {
-                return { ...c, url: newUrl, urlStatus: 'valid' };
+            // 修復後重新做後端 HTTP 驗證，避免 AI 仍然回傳錯誤 URL
+            try {
+              const verifyRes = await fetch('/api/utils/verify-links', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ urls: [newUrl] })
+              });
+              if (verifyRes.ok) {
+                const verifyMap = await verifyRes.json();
+                const isNewUrlValid = verifyMap[newUrl];
+                setResults(prev => prev.map(c =>
+                  c.theme === conference.theme
+                    ? { ...c, url: isNewUrlValid ? newUrl : c.url, urlStatus: isNewUrlValid ? 'valid' as const : 'invalid' as const }
+                    : c
+                ));
+                return;
               }
-              return c;
-            }));
+            } catch (_verifyErr) {
+              // 後端驗證失敗時，仍套用新 URL 但維持 pending 狀態
+              setResults(prev => prev.map(c =>
+                c.theme === conference.theme ? { ...c, url: newUrl, urlStatus: 'pending' as const } : c
+              ));
+              return;
+            }
           } else {
-            setResults(prev => prev.map(c => c.theme === conference.theme ? { ...c, urlStatus: 'invalid' } : c));
+            // AI 沒有找到不同的 URL
+            break;
           }
-          return;
         } else {
           break;
         }
       } catch (e: any) {
         if (e.message && (e.message.includes('429') || e.message.includes('RESOURCE_EXHAUSTED'))) {
           const waitTime = Math.pow(2, retryCount) * 15000;
-          console.warn(`Link fix quota exceeded. Retrying in ${waitTime/1000}s...`);
+          console.warn(`fixLink quota exceeded. Retrying in ${waitTime / 1000}s...`);
           await sleep(waitTime);
           retryCount++;
         } else {
@@ -811,7 +818,11 @@ export default function App() {
         }
       }
     }
-    setResults(prev => prev.map(c => c.theme === conference.theme ? { ...c, urlStatus: 'invalid' } : c));
+
+    // 三次重試失敗 → 確認為無效，不保留虛構連結
+    setResults(prev => prev.map(c =>
+      c.theme === conference.theme ? { ...c, urlStatus: 'invalid' as const } : c
+    ));
   };
 
   const formatError = (err: string) => {
@@ -1164,22 +1175,29 @@ export default function App() {
                         </td>
                         <td className="px-4 py-4 whitespace-normal min-w-[250px]">
                           <div className="space-y-2">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               {conf.urlStatus === 'pending' && <Loader2 size={14} className="text-slate-500 animate-spin" />}
                               {conf.urlStatus === 'valid' && <CheckSquare size={14} className="text-emerald-500 dark:text-emerald-400" />}
                               {conf.urlStatus === 'invalid' && <AlertTriangle size={14} className="text-red-500 dark:text-red-400" />}
                               {conf.urlStatus === 'fixing' && <RefreshCw size={14} className="text-amber-500 dark:text-amber-400 animate-spin" />}
-                              
-                              <a href={conf.url} target="_blank" rel="noreferrer" className={cn(
-                                "text-xs font-mono truncate max-w-[200px] hover:underline flex items-center gap-1",
-                                conf.urlStatus === 'valid' ? "text-blue-600 dark:text-blue-400" :
-                                conf.urlStatus === 'invalid' ? "text-red-500 dark:text-red-400 line-through opacity-50" :
-                                conf.urlStatus === 'fixing' ? "text-amber-600 dark:text-amber-400" : "text-slate-500 dark:text-slate-400"
-                              )}>
-                                <LinkIcon size={12} />
-                                {conf.urlStatus === 'fixing' ? '正在自動修正...' : conf.url}
-                              </a>
-                              <button 
+
+                              {conf.urlStatus === 'invalid' ? (
+                                // invalid 狀態：不渲染可點擊連結，避免使用者點到虛假 URL
+                                <span className="text-xs text-red-500 dark:text-red-400 font-medium">
+                                  無法確認官方連結
+                                </span>
+                              ) : (
+                                <a href={conf.url} target="_blank" rel="noreferrer" className={cn(
+                                  "text-xs font-mono truncate max-w-[200px] hover:underline flex items-center gap-1",
+                                  conf.urlStatus === 'valid' ? "text-blue-600 dark:text-blue-400" :
+                                  conf.urlStatus === 'fixing' ? "text-amber-600 dark:text-amber-400" : "text-slate-500 dark:text-slate-400"
+                                )}>
+                                  <LinkIcon size={12} />
+                                  {conf.urlStatus === 'fixing' ? '正在自動修正...' : conf.url}
+                                </a>
+                              )}
+
+                              <button
                                 onClick={() => reportLink(conf)}
                                 className="text-[10px] text-slate-400 hover:text-red-500 ml-2 underline"
                               >
