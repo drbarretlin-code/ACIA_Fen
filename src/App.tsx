@@ -614,23 +614,37 @@ export default function App() {
               6. 不得推測、組合或編造任何資訊。
             `;
 
+            const sourceField = {
+              type: "OBJECT",
+              properties: {
+                value: { type: "STRING" },
+                sources: { type: "ARRAY", items: { type: "INTEGER" } }
+              },
+              required: ["value", "sources"]
+            };
+
             const searchSchema = {
               type: "ARRAY",
               items: {
                 type: "OBJECT",
                 properties: {
-                  theme: { type: "STRING", description: "會議主題" },
-                  topics: { type: "STRING", description: "徵稿主題（或範圍）" },
-                  date: { type: "STRING", description: "舉辦時間（必須是 originalTextQuote 中出現的原文）" },
-                  location: { type: "STRING", description: "地點（必須是 originalTextQuote 中出現的原文）" },
-                  deadline: { type: "STRING", description: "投稿截止日（必須是 originalTextQuote 中出現的原文）" },
-                  presentationType: { type: "STRING", description: "發佈形態 (口頭 / 海報 / 其他)" },
-                  predatoryAnalysis: { type: "STRING", description: "掠奪性期刊分析 (含鑑識說明)" },
-                  url: { type: "STRING", description: "會議官方網站完整 URL（若無法確認填 NOT_FOUND）" },
-                  originalTextQuote: { type: "STRING", description: "包含 date、location、deadline 的搜尋結果原文段落（500 字元內，date/location/deadline 必須能在此段落中找到）" },
-                  urlSource: { type: "STRING", description: "搜尋結果來源說明（標題或來源網域）" }
+                  THEME: sourceField,
+                  TYPE: sourceField,
+                  DATE: sourceField,
+                  LOCATION: sourceField,
+                  DEADLINE: sourceField,
+                  PREDATORY: {
+                    type: "OBJECT",
+                    properties: {
+                      value: { type: "STRING" },
+                      reason: { type: "STRING" },
+                      sources: { type: "ARRAY", items: { type: "INTEGER" } }
+                    },
+                    required: ["value", "reason", "sources"]
+                  },
+                  URL: { type: "STRING" }
                 },
-                required: ["theme", "topics", "date", "location", "deadline", "presentationType", "predatoryAnalysis", "url", "originalTextQuote", "urlSource"]
+                required: ["THEME", "TYPE", "DATE", "LOCATION", "DEADLINE", "PREDATORY", "URL"]
               }
             };
 
@@ -659,13 +673,13 @@ export default function App() {
                 // ── 從 groundingMetadata 提取搜尋引擎實際回傳的原文片段與來源 URL ──
                 // 這是防止 cross-source mapping 的關鍵：用搜尋引擎的 ground truth 取代模型的合成文字
                 const groundingMeta = (phaseAResult as any).candidates?.[0]?.groundingMetadata;
-                let groundingPassages = '';
+                let structuredSources = '';
                 if (groundingMeta?.groundingChunks && groundingMeta?.groundingSupports) {
                   const passages: string[] = [];
-                  for (const support of groundingMeta.groundingSupports) {
+                  groundingMeta.groundingSupports.forEach((support: any, index: number) => {
                     const chunkIndices: number[] = support.groundingChunkIndices || [];
                     const segmentText: string = support.segment?.text || '';
-                    if (!segmentText) continue;
+                    if (!segmentText) return;
                     const sources = chunkIndices
                       .map((idx: number) => {
                         const chunk = groundingMeta.groundingChunks[idx];
@@ -673,106 +687,43 @@ export default function App() {
                         return null;
                       })
                       .filter(Boolean);
-                    passages.push(`來源: ${sources.join(', ') || '未知'}\n內容: ${segmentText}`);
-                  }
-                  groundingPassages = passages.join('\n---\n');
+                    passages.push(`[Source ID: ${index}]\n來源: ${sources.join(', ') || '未知'}\n內容: ${segmentText}`);
+                  });
+                  structuredSources = passages.join('\n---\n');
                 }
 
-                // 若無 groundingMetadata（API 版本差異或搜尋無結果），退回使用模型摘要
-                const hasGroundingData = groundingPassages.length > 0;
+                // ── Phase B：從溯源文本與多重來源模型進行結構化提取 ──
+                const phaseBPrompt = `
+你是一個極度嚴謹的學術會議資料結構化提取器。你的任務是從提供的資料來源中，結構化提取會議資訊。
 
-                // ── 同時收集 groundingChunks 中的所有來源 URL，供 Phase B 優先使用 ──
-                let groundingUrls = '';
-                if (groundingMeta?.groundingChunks) {
-                  const urlList = groundingMeta.groundingChunks
-                    .filter((c: any) => c?.web?.uri)
-                    .map((c: any) => `- ${c.web.title || 'Unknown'}: ${c.web.uri}`);
-                  if (urlList.length > 0) {
-                    groundingUrls = urlList.join('\n');
-                  }
-                }
+=== 資料來源 (Data Sources) === 
+${structuredSources || '（無結構化資料源，請參考下方搜尋引擎摘要提取）'}
+================================
 
-                // ── Phase B：從 grounding 原文做嚴格結構化提取，不使用任何工具 ──
-                // ── Phase B prompt 核心策略：「先引用、再從引用提取」 ──
-                // 強制模型先產出 originalTextQuote（錨定來源原文），
-                // 再從該段原文中提取 date/location/deadline。
-                // 這確保所有欄位必然來自同一段文字，從架構層面消除 cross-source mapping。
-                const phaseBPrompt = hasGroundingData
-                  ? `
-                  你是一個嚴格的資料結構化提取器。
-                  以下有兩組資料：
-                  1.「搜尋引擎原始片段」：搜尋引擎實際回傳的原文片段，附出處網址（Ground Truth，最高優先）。
-                  2.「模型摘要」：AI 根據搜尋結果產出的會議資訊摘要（僅供輔助識別會議名稱與主題，不可從中取用 date/location/deadline/url）。
+=== 搜尋引擎摘要 (僅供參考會議名稱與輔助主題) ===
+${rawSearchText}
+================================
 
-                  ===搜尋引擎原始片段（Ground Truth，唯一允許的資料欄位來源）===
-                  ${groundingPassages}
-                  ===結束===
+### 核心原則 (Core Principles)
+1. 允許整合與多重溯源：你可以結合不同 [Source ID] 的片段來補齊同一場會議的完整面貌。但針對提取的每一個『單一欄位』，都必須在 sources 陣列中標明其對應的 [Source ID] (整數陣列)。若沒有 [Source ID] 可用，請留空陣列 []。
+2. 零捏造防線：如果完全找不到特定欄位的資訊，必須強制填入 "UNKNOWN"。絕不可將大會舉辦日誤認為投稿截止日，也不得自行推斷年份。
+3. 日期與地點標準化：你可以將雜亂的日期與地點，轉換為標準易讀的格式。但在執行標準化的同時，必須確保該資訊來自於某個 Source ID，並確實標記。
+4. 格式絕對隔離：只能輸出純粹的 JSON 陣列！絕對禁止使用任何 Markdown 語法（例如 \`\`\`json 標籤），你的第一個字元必須是 [，最後一個字元必須是 ]。
 
-                  ===搜尋引擎來源 URL 清單===
-                  ${groundingUrls || '（無可用 URL）'}
-                  ===結束===
-
-                  ===模型摘要（僅供識別會議名稱與主題，禁止從中取用 date/location/deadline/url）===
-                  ${rawSearchText}
-                  ===結束===
-
-                  嚴格執行以下步驟（每一筆會議都必須按此順序處理）：
-
-                  步驟 1：識別會議
-                  從搜尋引擎原始片段中識別一筆會議，確定其 theme 與 topics（可參考模型摘要輔助辨識）。
-
-                  步驟 2：產出 originalTextQuote（最關鍵步驟）
-                  從「搜尋引擎原始片段」中，找到包含該會議日期、地點、截止日資訊的那一段原文。
-                  將該段原文逐字複製到 originalTextQuote 欄位（上限 500 字元）。
-                  此段引用文字必須是搜尋引擎原始片段的逐字複製，禁止改寫、摘要或重新組合。
-
-                  步驟 3：從 originalTextQuote 中提取欄位（最嚴格約束）
-                  - date：在步驟 2 產出的 originalTextQuote 文字中，找到舉辦日期的原文，逐字複製到 date 欄位。
-                  - location：在步驟 2 產出的 originalTextQuote 文字中，找到地點的原文，逐字複製到 location 欄位。
-                  - deadline：在步驟 2 產出的 originalTextQuote 文字中，找到投稿截止日的原文，逐字複製到 deadline 欄位。
-                  - 若 originalTextQuote 中不包含某欄位，該欄位填「資訊未提供」。
-                  - 禁止從 originalTextQuote 以外的任何地方取用 date/location/deadline。
-
-                  步驟 4：填入其餘欄位
-                  - url：優先使用「搜尋引擎來源 URL 清單」中與該會議對應的完整 URL。若無，填「NOT_FOUND」。
-                  - urlSource：該 URL 的搜尋結果標題或網域。
-                  - presentationType、predatoryAnalysis 可從模型摘要或搜尋引擎原始片段中提取。
-
-                  驗證規則（自我檢查，違反則修正）：
-                  - date 的值必須是 originalTextQuote 的子字串。若不是，將 date 改為「資訊未提供」。
-                  - location 的值必須是 originalTextQuote 的子字串。若不是，將 location 改為「資訊未提供」。
-                  - deadline 的值必須是 originalTextQuote 的子字串。若不是，將 deadline 改為「資訊未提供」。
-
-                  輸出為 JSON 陣列格式。
-                `
-                  : `
-                  你是一個嚴格的資料結構化提取器。
-                  以下是已從搜尋引擎取得的學術會議原始資訊，請從中提取結構化資料。
-
-                  ===原始搜尋資訊（唯一允許的資料來源）===
-                  ${rawSearchText}
-                  ===結束===
-
-                  嚴格執行以下步驟（每一筆會議都必須按此順序處理）：
-
-                  步驟 1：識別會議，確定其 theme 與 topics。
-
-                  步驟 2：產出 originalTextQuote
-                  從原始搜尋資訊中，找到包含該會議日期、地點、截止日資訊的那一段原文。
-                  逐字複製到 originalTextQuote 欄位（上限 500 字元）。禁止改寫或重新組合。
-
-                  步驟 3：從 originalTextQuote 中提取欄位
-                  - date：在 originalTextQuote 中找到舉辦日期原文，逐字複製。找不到填「資訊未提供」。
-                  - location：在 originalTextQuote 中找到地點原文，逐字複製。找不到填「資訊未提供」。
-                  - deadline：在 originalTextQuote 中找到截止日原文，逐字複製。找不到填「資訊未提供」。
-                  - 禁止從 originalTextQuote 以外的任何地方取用這三個欄位。
-
-                  步驟 4：填入 url（以 https:// 開頭的完整網址，無法確認填 NOT_FOUND）及其餘欄位。
-
-                  驗證規則：date/location/deadline 的值必須是 originalTextQuote 的子字串，否則改為「資訊未提供」。
-
-                  輸出為 JSON 陣列格式。
-                `;
+### 輸出格式約束 (Output Format Schema)
+請僅輸出如下 JSON 陣列。若該欄位資訊出自多個片段，請將整數 ID 加入 sources 陣列；倘落找不到資料，請在 value 填 "UNKNOWN"，sources 填 []：
+[
+  {
+    "THEME": { "value": "會議名稱與徵稿主題", "sources": [0, 1] },
+    "TYPE": { "value": "oral / poster / hybrid / online 或 UNKNOWN", "sources": [1] },
+    "DATE": { "value": "西元標準化日期 (如 2024-10-25)", "sources": [0] },
+    "LOCATION": { "value": "地點名稱", "sources": [0] },
+    "DEADLINE": { "value": "標準化投稿截止日", "sources": [2] },
+    "PREDATORY": { "value": "低/中/高", "reason": "研判理由（含主辦方與收費模式）", "sources": [0] },
+    "URL": "https://..." 
+  }
+]
+`;
 
                 const phaseBResult = await ai.models.generateContent({
                   model: 'gemini-3-flash-preview',
@@ -796,86 +747,24 @@ export default function App() {
 
                   const rawData = Array.isArray(data) ? data : (data.conferences || []);
 
-                  // ── 程式邏輯硬約束：enforceQuoteConsistency ──
-                  // 此為 LLM 無法繞過的確定性驗證。
-                  // 檢查 date/location/deadline 是否為 originalTextQuote 的子字串。
-                  // 不符者嘗試從 quote 中 regex 提取修正；仍不符者清除為「資訊未提供」。
-                  const enforceQuoteConsistency = (items: any[]): any[] => {
-                    return items.map(c => {
-                      const quote = c.originalTextQuote || '';
-                      if (!quote || quote.length < 10) return c;
-
-                      // 正規化：統一空白、破折號變體，用於模糊比對
-                      const normalize = (s: string) =>
-                        s.replace(/\s+/g, ' ').replace(/[\u2013\u2014\u2012\u2015]/g, '-').trim();
-                      const quoteNorm = normalize(quote).toLowerCase();
-
-                      const isSubstring = (value: string): boolean => {
-                        if (!value || value === '資訊未提供' || value === 'NOT_FOUND') return true;
-                        const vNorm = normalize(value).toLowerCase();
-                        if (quoteNorm.includes(vNorm)) return true;
-                        // 容許前半段匹配（破折號前的部分）
-                        const dashIdx = vNorm.indexOf('-');
-                        if (dashIdx > 3) {
-                          const prefix = vNorm.substring(0, dashIdx).trim();
-                          if (prefix.length >= 4 && quoteNorm.includes(prefix)) return true;
-                        }
-                        return false;
-                      };
-
-                      // 從 quote 中 regex 提取日期模式
-                      const tryExtractDate = (): string | null => {
-                        const patterns = [
-                          /\b(\w{3,9}\.?\s+\d{1,2}\s*[-\u2013\u2014]\s*\d{1,2},?\s*\d{4})\b/i,
-                          /\b(\d{1,2}\s*[-\u2013\u2014]\s*\d{1,2}\s+\w{3,9}\.?,?\s*\d{4})\b/i,
-                          /\b(\w{3,9}\.?\s+\d{1,2},?\s*\d{4})\b/i,
-                          /\b(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})\b/,
-                          /(\d{4}\u5E74\d{1,2}\u6708\d{1,2}\u65E5?)/,
-                        ];
-                        for (const p of patterns) {
-                          const m = quote.match(p);
-                          if (m) return m[1];
-                        }
-                        return null;
-                      };
-
-                      let finalDate = c.date;
-                      let finalLocation = c.location;
-                      let finalDeadline = c.deadline;
-
-                      if (!isSubstring(c.date)) {
-                        const extracted = tryExtractDate();
-                        finalDate = extracted || '資訊未提供';
-                        console.warn(`[QuoteConsistency] date 不符：「${c.date}」不在引用中，修正為「${finalDate}」`);
-                      }
-
-                      if (!isSubstring(c.location)) {
-                        finalLocation = '資訊未提供';
-                        console.warn(`[QuoteConsistency] location 不符：「${c.location}」不在引用中，修正為「資訊未提供」`);
-                      }
-
-                      if (!isSubstring(c.deadline)) {
-                        // deadline 也嘗試 regex 提取（排除已匹配的 date）
-                        const allDates: string[] = [];
-                        const datePatterns = [
-                          /\b(\w{3,9}\.?\s+\d{1,2},?\s*\d{4})\b/gi,
-                          /\b(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})\b/g,
-                        ];
-                        for (const p of datePatterns) {
-                          let m;
-                          while ((m = p.exec(quote)) !== null) {
-                            if (m[1] !== finalDate) allDates.push(m[1]);
-                          }
-                        }
-                        finalDeadline = allDates.length > 0 ? allDates[allDates.length - 1] : '資訊未提供';
-                        console.warn(`[QuoteConsistency] deadline 不符：「${c.deadline}」不在引用中，修正為「${finalDeadline}」`);
-                      }
-
-                      return { ...c, date: finalDate, location: finalLocation, deadline: finalDeadline };
-                    });
-                  };
-
-                  const validData = enforceQuoteConsistency(rawData);
+                  // ── 資料結構 Adapter：將多重溯源的巢狀轉換為前端 Flat `Conference` 介面 ──
+                  const validData = rawData.map((item: any) => {
+                    const getVal = (field: any) => (field?.value === "UNKNOWN" || !field?.value) ? "資訊未提供" : field.value;
+                    const getSources = (field: any) => (field?.sources || []).join(', ');
+                    
+                    return {
+                      theme: getVal(item.THEME) || getVal(item.THEME?.value), // 保險起見
+                      topics: getVal(item.THEME), // 簡單對應，主題與徵稿合併
+                      date: getVal(item.DATE),
+                      location: getVal(item.LOCATION),
+                      deadline: getVal(item.DEADLINE),
+                      presentationType: getVal(item.TYPE),
+                      predatoryAnalysis: `${getVal(item.PREDATORY)} (${item.PREDATORY?.reason || '無說明'})`,
+                      url: item.URL === "UNKNOWN" ? "NOT_FOUND" : (item.URL || "NOT_FOUND"),
+                      originalTextQuote: `擷取來源 ID: ${getSources(item.DATE)} (日期), ${getSources(item.LOCATION)} (地點), ${getSources(item.DEADLINE)} (期限)`,
+                      urlSource: "多重溯源自動匹配",
+                    };
+                  });
 
                   // 過濾 NOT_FOUND URL：防止虛假或不完整連結進入結果集
                   const cleanedData = validData.filter((c: any) =>
