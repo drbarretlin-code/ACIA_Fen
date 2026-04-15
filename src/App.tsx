@@ -621,13 +621,13 @@ export default function App() {
                 properties: {
                   theme: { type: "STRING", description: "會議主題" },
                   topics: { type: "STRING", description: "徵稿主題（或範圍）" },
-                  date: { type: "STRING", description: "舉辦時間（直接引用官網原文）" },
-                  location: { type: "STRING", description: "地點（直接引用官網原文）" },
-                  deadline: { type: "STRING", description: "投稿截止日（直接引用官網原文）" },
+                  date: { type: "STRING", description: "舉辦時間（必須是 originalTextQuote 中出現的原文）" },
+                  location: { type: "STRING", description: "地點（必須是 originalTextQuote 中出現的原文）" },
+                  deadline: { type: "STRING", description: "投稿截止日（必須是 originalTextQuote 中出現的原文）" },
                   presentationType: { type: "STRING", description: "發佈形態 (口頭 / 海報 / 其他)" },
                   predatoryAnalysis: { type: "STRING", description: "掠奪性期刊分析 (含鑑識說明)" },
                   url: { type: "STRING", description: "會議官方網站完整 URL（若無法確認填 NOT_FOUND）" },
-                  originalTextQuote: { type: "STRING", description: "與 DATE、DEADLINE、URL 來自同一網頁的原文字句" },
+                  originalTextQuote: { type: "STRING", description: "包含 date、location、deadline 的搜尋結果原文段落（500 字元內，date/location/deadline 必須能在此段落中找到）" },
                   urlSource: { type: "STRING", description: "搜尋結果來源說明（標題或來源網域）" }
                 },
                 required: ["theme", "topics", "date", "location", "deadline", "presentationType", "predatoryAnalysis", "url", "originalTextQuote", "urlSource"]
@@ -693,6 +693,10 @@ export default function App() {
                 }
 
                 // ── Phase B：從 grounding 原文做嚴格結構化提取，不使用任何工具 ──
+                // ── Phase B prompt 核心策略：「先引用、再從引用提取」 ──
+                // 強制模型先產出 originalTextQuote（錨定來源原文），
+                // 再從該段原文中提取 date/location/deadline。
+                // 這確保所有欄位必然來自同一段文字，從架構層面消除 cross-source mapping。
                 const phaseBPrompt = hasGroundingData
                   ? `
                   你是一個嚴格的資料結構化提取器。
@@ -712,18 +716,34 @@ export default function App() {
                   ${rawSearchText}
                   ===結束===
 
-                  提取規則（違反任何一條視為錯誤輸出）：
-                  1. 每一筆會議的 date、location、deadline 欄位，必須且只能從「搜尋引擎原始片段」中提取原文。禁止從「模型摘要」取用這三個欄位。
-                  2. 每一筆會議的所有欄位（date、location、deadline、url）必須來自同一個「搜尋引擎原始片段」區塊，嚴禁跨區塊混用。
-                  3. date 欄位：填入該片段中明確出現的舉辦日期原文（例如："July 10–12, 2025"）。若片段中未出現，填「資訊未提供」。
-                  4. location 欄位：填入該片段中明確出現的地點原文。若片段中未出現，填「資訊未提供」。
-                  5. deadline 欄位：填入該片段中明確出現的投稿截止日原文。若片段中未出現，填「資訊未提供」。
-                  6. url 欄位：優先使用「搜尋引擎來源 URL 清單」中與該會議對應的完整 URL。若無，填「NOT_FOUND」。禁止組合或推測網址。
-                  7. originalTextQuote：直接複製該筆會議所對應的「搜尋引擎原始片段」原文（字元數不超過 200）。
-                  8. urlSource：填入該 URL 所來自的搜尋結果標題或網域。
-                  9. theme 與 topics 可參考「模型摘要」輔助辨識。
-                  10. 若某欄位在原始片段中完全找不到對應，填「資訊未提供」。
-                  11. 輸出為 JSON 陣列格式。
+                  嚴格執行以下步驟（每一筆會議都必須按此順序處理）：
+
+                  步驟 1：識別會議
+                  從搜尋引擎原始片段中識別一筆會議，確定其 theme 與 topics（可參考模型摘要輔助辨識）。
+
+                  步驟 2：產出 originalTextQuote（最關鍵步驟）
+                  從「搜尋引擎原始片段」中，找到包含該會議日期、地點、截止日資訊的那一段原文。
+                  將該段原文逐字複製到 originalTextQuote 欄位（上限 500 字元）。
+                  此段引用文字必須是搜尋引擎原始片段的逐字複製，禁止改寫、摘要或重新組合。
+
+                  步驟 3：從 originalTextQuote 中提取欄位（最嚴格約束）
+                  - date：在步驟 2 產出的 originalTextQuote 文字中，找到舉辦日期的原文，逐字複製到 date 欄位。
+                  - location：在步驟 2 產出的 originalTextQuote 文字中，找到地點的原文，逐字複製到 location 欄位。
+                  - deadline：在步驟 2 產出的 originalTextQuote 文字中，找到投稿截止日的原文，逐字複製到 deadline 欄位。
+                  - 若 originalTextQuote 中不包含某欄位，該欄位填「資訊未提供」。
+                  - 禁止從 originalTextQuote 以外的任何地方取用 date/location/deadline。
+
+                  步驟 4：填入其餘欄位
+                  - url：優先使用「搜尋引擎來源 URL 清單」中與該會議對應的完整 URL。若無，填「NOT_FOUND」。
+                  - urlSource：該 URL 的搜尋結果標題或網域。
+                  - presentationType、predatoryAnalysis 可從模型摘要或搜尋引擎原始片段中提取。
+
+                  驗證規則（自我檢查，違反則修正）：
+                  - date 的值必須是 originalTextQuote 的子字串。若不是，將 date 改為「資訊未提供」。
+                  - location 的值必須是 originalTextQuote 的子字串。若不是，將 location 改為「資訊未提供」。
+                  - deadline 的值必須是 originalTextQuote 的子字串。若不是，將 deadline 改為「資訊未提供」。
+
+                  輸出為 JSON 陣列格式。
                 `
                   : `
                   你是一個嚴格的資料結構化提取器。
@@ -733,14 +753,25 @@ export default function App() {
                   ${rawSearchText}
                   ===結束===
 
-                  提取規則（違反任何一條視為錯誤輸出）：
-                  1. 所有欄位的值必須直接來自上方原始資訊，禁止補充、推測或憑記憶填入原始資訊中沒有的內容。
-                  2. date 欄位：填入原始資訊中明確出現的舉辦日期原文（例如："July 10–12, 2025"）。若未出現，填「資訊未提供」。
-                  3. deadline 欄位：填入原始資訊中明確出現的投稿截止日原文。若未出現，填「資訊未提供」。
-                  4. url 欄位：填入原始資訊中明確提及且以 https:// 開頭的完整網址。若原始資訊中未出現完整 URL，填「NOT_FOUND」，禁止組合或推測網址。
-                  5. originalTextQuote：從原始資訊中挑選與該筆會議 date、deadline 及 url 相關聯的同一段文字，字元數不超過 200。
-                  6. 若某欄位在原始資訊中完全找不到對應，填「資訊未提供」。
-                  7. 輸出為 JSON 陣列格式。
+                  嚴格執行以下步驟（每一筆會議都必須按此順序處理）：
+
+                  步驟 1：識別會議，確定其 theme 與 topics。
+
+                  步驟 2：產出 originalTextQuote
+                  從原始搜尋資訊中，找到包含該會議日期、地點、截止日資訊的那一段原文。
+                  逐字複製到 originalTextQuote 欄位（上限 500 字元）。禁止改寫或重新組合。
+
+                  步驟 3：從 originalTextQuote 中提取欄位
+                  - date：在 originalTextQuote 中找到舉辦日期原文，逐字複製。找不到填「資訊未提供」。
+                  - location：在 originalTextQuote 中找到地點原文，逐字複製。找不到填「資訊未提供」。
+                  - deadline：在 originalTextQuote 中找到截止日原文，逐字複製。找不到填「資訊未提供」。
+                  - 禁止從 originalTextQuote 以外的任何地方取用這三個欄位。
+
+                  步驟 4：填入 url（以 https:// 開頭的完整網址，無法確認填 NOT_FOUND）及其餘欄位。
+
+                  驗證規則：date/location/deadline 的值必須是 originalTextQuote 的子字串，否則改為「資訊未提供」。
+
+                  輸出為 JSON 陣列格式。
                 `;
 
                 const phaseBResult = await ai.models.generateContent({
@@ -763,7 +794,88 @@ export default function App() {
                     if (match) data = JSON.parse(match[1]);
                   }
 
-                  const validData = Array.isArray(data) ? data : (data.conferences || []);
+                  const rawData = Array.isArray(data) ? data : (data.conferences || []);
+
+                  // ── 程式邏輯硬約束：enforceQuoteConsistency ──
+                  // 此為 LLM 無法繞過的確定性驗證。
+                  // 檢查 date/location/deadline 是否為 originalTextQuote 的子字串。
+                  // 不符者嘗試從 quote 中 regex 提取修正；仍不符者清除為「資訊未提供」。
+                  const enforceQuoteConsistency = (items: any[]): any[] => {
+                    return items.map(c => {
+                      const quote = c.originalTextQuote || '';
+                      if (!quote || quote.length < 10) return c;
+
+                      // 正規化：統一空白、破折號變體，用於模糊比對
+                      const normalize = (s: string) =>
+                        s.replace(/\s+/g, ' ').replace(/[\u2013\u2014\u2012\u2015]/g, '-').trim();
+                      const quoteNorm = normalize(quote).toLowerCase();
+
+                      const isSubstring = (value: string): boolean => {
+                        if (!value || value === '資訊未提供' || value === 'NOT_FOUND') return true;
+                        const vNorm = normalize(value).toLowerCase();
+                        if (quoteNorm.includes(vNorm)) return true;
+                        // 容許前半段匹配（破折號前的部分）
+                        const dashIdx = vNorm.indexOf('-');
+                        if (dashIdx > 3) {
+                          const prefix = vNorm.substring(0, dashIdx).trim();
+                          if (prefix.length >= 4 && quoteNorm.includes(prefix)) return true;
+                        }
+                        return false;
+                      };
+
+                      // 從 quote 中 regex 提取日期模式
+                      const tryExtractDate = (): string | null => {
+                        const patterns = [
+                          /\b(\w{3,9}\.?\s+\d{1,2}\s*[-\u2013\u2014]\s*\d{1,2},?\s*\d{4})\b/i,
+                          /\b(\d{1,2}\s*[-\u2013\u2014]\s*\d{1,2}\s+\w{3,9}\.?,?\s*\d{4})\b/i,
+                          /\b(\w{3,9}\.?\s+\d{1,2},?\s*\d{4})\b/i,
+                          /\b(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})\b/,
+                          /(\d{4}\u5E74\d{1,2}\u6708\d{1,2}\u65E5?)/,
+                        ];
+                        for (const p of patterns) {
+                          const m = quote.match(p);
+                          if (m) return m[1];
+                        }
+                        return null;
+                      };
+
+                      let finalDate = c.date;
+                      let finalLocation = c.location;
+                      let finalDeadline = c.deadline;
+
+                      if (!isSubstring(c.date)) {
+                        const extracted = tryExtractDate();
+                        finalDate = extracted || '資訊未提供';
+                        console.warn(`[QuoteConsistency] date 不符：「${c.date}」不在引用中，修正為「${finalDate}」`);
+                      }
+
+                      if (!isSubstring(c.location)) {
+                        finalLocation = '資訊未提供';
+                        console.warn(`[QuoteConsistency] location 不符：「${c.location}」不在引用中，修正為「資訊未提供」`);
+                      }
+
+                      if (!isSubstring(c.deadline)) {
+                        // deadline 也嘗試 regex 提取（排除已匹配的 date）
+                        const allDates: string[] = [];
+                        const datePatterns = [
+                          /\b(\w{3,9}\.?\s+\d{1,2},?\s*\d{4})\b/gi,
+                          /\b(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})\b/g,
+                        ];
+                        for (const p of datePatterns) {
+                          let m;
+                          while ((m = p.exec(quote)) !== null) {
+                            if (m[1] !== finalDate) allDates.push(m[1]);
+                          }
+                        }
+                        finalDeadline = allDates.length > 0 ? allDates[allDates.length - 1] : '資訊未提供';
+                        console.warn(`[QuoteConsistency] deadline 不符：「${c.deadline}」不在引用中，修正為「${finalDeadline}」`);
+                      }
+
+                      return { ...c, date: finalDate, location: finalLocation, deadline: finalDeadline };
+                    });
+                  };
+
+                  const validData = enforceQuoteConsistency(rawData);
 
                   // 過濾 NOT_FOUND URL：防止虛假或不完整連結進入結果集
                   const cleanedData = validData.filter((c: any) =>
