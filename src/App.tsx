@@ -617,10 +617,11 @@ export default function App() {
             const sourceField = {
               type: "OBJECT",
               properties: {
+                quote: { type: "STRING" },
                 value: { type: "STRING" },
                 sources: { type: "ARRAY", items: { type: "INTEGER" } }
               },
-              required: ["value", "sources"]
+              required: ["quote", "value", "sources"]
             };
 
             const searchSchema = {
@@ -636,13 +637,14 @@ export default function App() {
                   PREDATORY: {
                     type: "OBJECT",
                     properties: {
+                      quote: { type: "STRING" },
                       value: { type: "STRING" },
                       reason: { type: "STRING" },
                       sources: { type: "ARRAY", items: { type: "INTEGER" } }
                     },
-                    required: ["value", "reason", "sources"]
+                    required: ["quote", "value", "reason", "sources"]
                   },
-                  URL: { type: "STRING" }
+                  URL: sourceField
                 },
                 required: ["THEME", "TYPE", "DATE", "LOCATION", "DEADLINE", "PREDATORY", "URL"]
               }
@@ -694,33 +696,30 @@ export default function App() {
 
                 // ── Phase B：從溯源文本與多重來源模型進行結構化提取 ──
                 const phaseBPrompt = `
-你是一個極度嚴謹的學術會議資料結構化提取器。你的任務是從提供的資料來源中，結構化提取會議資訊。
+你是一個極度嚴謹的學術會議資料鑑識提取器。你的唯一任務是從下方的【真實資料來源】中，執行『錨定萃取』。
 
-=== 資料來源 (Data Sources) === 
-${structuredSources || '（無結構化資料源，請參考下方搜尋引擎摘要提取）'}
+=== 真實資料來源 (Ground Truth) === 
+${structuredSources || '（無結構化資料源，請退回判定為 UNKNOWN）'}
 ================================
 
-=== 搜尋引擎摘要 (僅供參考會議名稱與輔助主題) ===
-${rawSearchText}
-================================
-
-### 核心原則 (Core Principles)
-1. 允許整合與多重溯源：你可以結合不同 [Source ID] 的片段來補齊同一場會議的完整面貌。但針對提取的每一個『單一欄位』，都必須在 sources 陣列中標明其對應的 [Source ID] (整數陣列)。若沒有 [Source ID] 可用，請留空陣列 []。
-2. 零捏造防線：如果完全找不到特定欄位的資訊，必須強制填入 "UNKNOWN"。絕不可將大會舉辦日誤認為投稿截止日，也不得自行推斷年份。
-3. 日期與地點標準化：你可以將雜亂的日期與地點，轉換為標準易讀的格式。但在執行標準化的同時，必須確保該資訊來自於某個 Source ID，並確實標記。
-4. 格式絕對隔離：只能輸出純粹的 JSON 陣列！絕對禁止使用任何 Markdown 語法（例如 \`\`\`json 標籤），你的第一個字元必須是 [，最後一個字元必須是 ]。
+### 核心原則 (Zero Hallucination Principles)
+1. 嚴格隔離：你不得參考任何輔助摘要或自行腦補。所有萃取的資訊【必須且只能】來自上述的 [真實資料來源]。
+2. CoT 錨定萃取：針對每一個欄位（THEME, DATE, LOCATION 等），你必須先在 quote 欄位「一字不漏地」複製足以佐證的原文段落。
+3. 產生 value：基於你抄寫的 quote，再於 value 欄位寫出你的標準化答案。
+4. 來源指認：在 sources 陣列中，填入該 quote 來自的 [Source ID] 整數。
+5. 零捏造防線：如果真實資料來源中完全找不到特定欄位的資訊，quote 請填 "未提及"，value 必須強制填入 "UNKNOWN"，sources 留空 []。絕不可推測年份或假設網址！
 
 ### 輸出格式約束 (Output Format Schema)
-請僅輸出如下 JSON 陣列。若該欄位資訊出自多個片段，請將整數 ID 加入 sources 陣列；倘落找不到資料，請在 value 填 "UNKNOWN"，sources 填 []：
+請嚴格遵守以下 JSON 陣列格式。注意：每一個標準化 value 之前都必須有其 quote 證據！
 [
   {
-    "THEME": { "value": "會議名稱與徵稿主題", "sources": [0, 1] },
-    "TYPE": { "value": "oral / poster / hybrid / online 或 UNKNOWN", "sources": [1] },
-    "DATE": { "value": "西元標準化日期 (如 2024-10-25)", "sources": [0] },
-    "LOCATION": { "value": "地點名稱", "sources": [0] },
-    "DEADLINE": { "value": "標準化投稿截止日", "sources": [2] },
-    "PREDATORY": { "value": "低/中/高", "reason": "研判理由（含主辦方與收費模式）", "sources": [0] },
-    "URL": "https://..." 
+    "THEME": { "quote": "原文佐證", "value": "會議名稱與徵稿主題", "sources": [0] },
+    "TYPE": { "quote": "原文佐證", "value": "oral / poster / hybrid / online 或 UNKNOWN", "sources": [1] },
+    "DATE": { "quote": "原文佐證", "value": "西元標準化日期 (如 2024-10-25)", "sources": [0] },
+    "LOCATION": { "quote": "原文佐證", "value": "地點名稱", "sources": [0] },
+    "DEADLINE": { "quote": "原文佐證", "value": "標準化投稿截止日", "sources": [2] },
+    "PREDATORY": { "quote": "主辦方描述", "value": "低/中/高", "reason": "研判理由（含主辦方與收費模式）", "sources": [0] },
+    "URL": { "quote": "URL 出現的上下文", "value": "https://...", "sources": [0] }
   }
 ]
 `;
@@ -747,22 +746,28 @@ ${rawSearchText}
 
                   const rawData = Array.isArray(data) ? data : (data.conferences || []);
 
-                  // ── 資料結構 Adapter：將多重溯源的巢狀轉換為前端 Flat `Conference` 介面 ──
+                  // ── 資料結構 Adapter：將 CoT 錨定結果轉換為平坦介面 ──
                   const validData = rawData.map((item: any) => {
                     const getVal = (field: any) => (field?.value === "UNKNOWN" || !field?.value) ? "資訊未提供" : field.value;
-                    const getSources = (field: any) => (field?.sources || []).join(', ');
+                    const getQuoteLog = (name: string, field: any) => 
+                      `${name} [Src: ${(field?.sources || []).join(',')}] -> 證據: "${field?.quote || '無'}"`;
                     
                     return {
-                      theme: getVal(item.THEME) || getVal(item.THEME?.value), // 保險起見
-                      topics: getVal(item.THEME), // 簡單對應，主題與徵稿合併
+                      theme: getVal(item.THEME),
+                      topics: getVal(item.THEME),
                       date: getVal(item.DATE),
                       location: getVal(item.LOCATION),
                       deadline: getVal(item.DEADLINE),
                       presentationType: getVal(item.TYPE),
                       predatoryAnalysis: `${getVal(item.PREDATORY)} (${item.PREDATORY?.reason || '無說明'})`,
-                      url: item.URL === "UNKNOWN" ? "NOT_FOUND" : (item.URL || "NOT_FOUND"),
-                      originalTextQuote: `擷取來源 ID: ${getSources(item.DATE)} (日期), ${getSources(item.LOCATION)} (地點), ${getSources(item.DEADLINE)} (期限)`,
-                      urlSource: "多重溯源自動匹配",
+                      url: item.URL?.value === "UNKNOWN" ? "NOT_FOUND" : (item.URL?.value || "NOT_FOUND"),
+                      originalTextQuote: [
+                        getQuoteLog('時間', item.DATE),
+                        getQuoteLog('地點', item.LOCATION),
+                        getQuoteLog('期限', item.DEADLINE),
+                        getQuoteLog('網址', item.URL)
+                      ].join('\n'),
+                      urlSource: "錨定萃取 (Zero Hallucination)",
                     };
                   });
 
