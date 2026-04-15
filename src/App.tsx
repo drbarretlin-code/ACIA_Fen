@@ -559,37 +559,52 @@ export default function App() {
       const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
       // Phase 2: Queue-based Search (Reduce)
+      // ── 兩階段解耦架構 ──
+      // Phase A（googleSearch）與 Phase B（JSON Schema）必須分開呼叫。
+      // 合併呼叫時，模型會跨不同搜尋片段湊齊欄位（cross-source mapping），
+      // 導致日期/地點/截止日欄位資料來源不一致，且 URL 會被截斷或遺失。
       const processQueue = async (items: string[], concurrency: number) => {
         const queue = [...items];
         const worker = async () => {
           while (queue.length > 0) {
             const subField = queue.shift();
             if (!subField) continue;
-            
+
             setSearchProgress(prev => ({ ...prev, current: subField }));
-            
+
             const isChinaSelected = Array.from<string>(selectedLocations).some(loc => loc.includes('中國') || loc.includes('China'));
-            
-            const searchPrompt = `
+
+            // Phase A Prompt：googleSearch 純文字搜尋，每筆會議以固定標記格式輸出
+            const phaseAPrompt = `
               Role: 國際學術會議情報鑑識系統
-              Objective: 檢索全球會議資訊，並執行掠奪性期刊鑑識。
+              Objective: 使用 Google Search 檢索真實學術會議資訊。
               Language: 繁體中文
-              
+
               Parameters:
               - 領域: ${subField} (屬於 ${actualField})
               - 時間: ${startDate} ~ ${endDate}
               - 地點: ${Array.from(selectedLocations).join(', ')}
 
               Instructions:
-              1. 嚴格遵守「逆向三步驟」驗證規則：
-                 - 第一步（識別）：確認會議名稱、主辦單位及舉辦細節。
-                 - 第二步（定位）：尋找該會議的「官方網站」深層網址，優先選擇 .edu, .org 或學術學會網域。
-                 - 第三步（驗證）：確保所提供的網址目前可公開訪問，且內容確實包含該會議的徵稿資訊。
+              1. 使用 Google Search 搜尋符合上述條件的國際學術會議。
               2. 廣泛檢索各大學、研究機構、學會及期刊組織 (如 SSCI, SCI, EI) 的官方訊息。
               ${isChinaSelected ? `特別指示：請強制檢索中國重點大學官網 (site:tsinghua.edu.cn, pku.edu.cn, zju.edu.cn, sjtu.edu.cn, fudan.edu.cn, nju.edu.cn, ustc.edu.cn 等)。` : ''}
-              3. 提取確切深層網址，摘錄網頁原文字句以支持論點。
-              4. 交叉比對主辦方與收費模式，進行「掠奪性期刊」研判。
-              5. 必須回傳 JSON 陣列。
+              3. 針對每一筆找到的會議，以下列格式輸出，每筆之間以單行 "---ENTRY---" 分隔：
+
+                 [THEME]: 會議完整官方名稱
+                 [TOPICS]: 徵稿主題或範圍
+                 [DATE]: 舉辦時間（直接引用搜尋結果原文，例如：July 10-12, 2025）
+                 [LOCATION]: 地點（直接引用搜尋結果原文）
+                 [DEADLINE]: 投稿截止日（直接引用搜尋結果原文）
+                 [TYPE]: 發佈形態（oral / poster / hybrid / online）
+                 [PREDATORY]: 掠奪性期刊研判（說明理由，含主辦方、收費模式）
+                 [URL]: 搜尋結果中看到的完整官方網站 URL（必須以 https:// 開頭；若未在搜尋結果中看到完整 URL，填 NOT_FOUND）
+                 [QUOTE]: 從搜尋結果摘要中、與 DATE / DEADLINE / URL 相關聯的同一段原文字句（200 字元內）
+                 [URL_SOURCE]: 此 URL 的搜尋來源（搜尋結果頁面標題或來源網域）
+
+              4. 每筆資料的 DATE、DEADLINE、URL、QUOTE 必須來自同一個網頁或搜尋結果摘要，不得跨來源混用。
+              5. 若某欄位無法從搜尋結果確認，填入「資訊未提供」或 NOT_FOUND。
+              6. 不得推測、組合或編造任何資訊。
             `;
 
             const searchSchema = {
@@ -599,14 +614,14 @@ export default function App() {
                 properties: {
                   theme: { type: "STRING", description: "會議主題" },
                   topics: { type: "STRING", description: "徵稿主題（或範圍）" },
-                  date: { type: "STRING", description: "舉辦時間" },
-                  location: { type: "STRING", description: "地點" },
-                  deadline: { type: "STRING", description: "投稿截止日" },
+                  date: { type: "STRING", description: "舉辦時間（直接引用官網原文）" },
+                  location: { type: "STRING", description: "地點（直接引用官網原文）" },
+                  deadline: { type: "STRING", description: "投稿截止日（直接引用官網原文）" },
                   presentationType: { type: "STRING", description: "發佈形態 (口頭 / 海報 / 其他)" },
                   predatoryAnalysis: { type: "STRING", description: "掠奪性期刊分析 (含鑑識說明)" },
-                  url: { type: "STRING", description: "會議官方網站完整 URL（必須從 Google Search 搜尋結果中直接複製，不得自行組合或推測）" },
-                  originalTextQuote: { type: "STRING", description: "支持論點的網頁原文字句" },
-                  urlSource: { type: "STRING", description: "找到此 URL 的搜尋來源摘要，例如：搜尋結果標題、搜尋關鍵字、來源網域。若為推測則填入 'inferred'。" }
+                  url: { type: "STRING", description: "會議官方網站完整 URL（若無法確認填 NOT_FOUND）" },
+                  originalTextQuote: { type: "STRING", description: "與 DATE、DEADLINE、URL 來自同一網頁的原文字句" },
+                  urlSource: { type: "STRING", description: "搜尋結果來源說明（標題或來源網域）" }
                 },
                 required: ["theme", "topics", "date", "location", "deadline", "presentationType", "predatoryAnalysis", "url", "originalTextQuote", "urlSource"]
               }
@@ -618,19 +633,53 @@ export default function App() {
 
             while (retryCount < maxRetries && !success) {
               try {
-                const result = await ai.models.generateContent({
+                // ── Phase A：googleSearch 純文字搜尋，不搭配 JSON Schema ──
+                const phaseAResult = await ai.models.generateContent({
                   model: 'gemini-3-flash-preview',
-                  contents: searchPrompt,
+                  contents: phaseAPrompt,
                   config: {
                     tools: [{ googleSearch: {} }],
-                    responseMimeType: 'application/json',
-                    responseSchema: searchSchema,
-                    temperature: 0.2
+                    temperature: 0.1
                   }
                 });
-                
-                if (result && result.text) {
-                  const text = result.text;
+
+                if (!phaseAResult?.text) {
+                  throw new Error('Phase A returned empty result');
+                }
+
+                const rawSearchText = phaseAResult.text;
+
+                // ── Phase B：從 Phase A 輸出做嚴格結構化提取，不使用任何工具 ──
+                const phaseBPrompt = `
+                  你是一個嚴格的資料結構化提取器。
+                  以下是已從搜尋引擎取得的學術會議原始資訊，請從中提取結構化資料。
+
+                  ===原始搜尋資訊（唯一允許的資料來源）===
+                  ${rawSearchText}
+                  ===結束===
+
+                  提取規則（違反任何一條視為錯誤輸出）：
+                  1. 所有欄位的值必須直接來自上方原始資訊，禁止補充、推測或憑記憶填入原始資訊中沒有的內容。
+                  2. date 欄位：填入原始資訊中明確出現的舉辦日期原文（例如："July 10–12, 2025"）。若未出現，填「資訊未提供」。
+                  3. deadline 欄位：填入原始資訊中明確出現的投稿截止日原文。若未出現，填「資訊未提供」。
+                  4. url 欄位：填入原始資訊中明確提及且以 https:// 開頭的完整網址。若原始資訊中未出現完整 URL，填「NOT_FOUND」，禁止組合或推測網址。
+                  5. originalTextQuote：從原始資訊中挑選與該筆會議 date、deadline 及 url 相關聯的同一段文字，字元數不超過 200。
+                  6. 若某欄位在原始資訊中完全找不到對應，填「資訊未提供」。
+                  7. 輸出為 JSON 陣列格式。
+                `;
+
+                const phaseBResult = await ai.models.generateContent({
+                  model: 'gemini-3-flash-preview',
+                  contents: phaseBPrompt,
+                  config: {
+                    responseMimeType: 'application/json',
+                    responseSchema: searchSchema,
+                    temperature: 0
+                  }
+                });
+
+                if (phaseBResult?.text) {
+                  const text = phaseBResult.text;
                   let data: any = [];
                   try {
                     data = JSON.parse(text);
@@ -638,10 +687,16 @@ export default function App() {
                     const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
                     if (match) data = JSON.parse(match[1]);
                   }
-                  
+
                   const validData = Array.isArray(data) ? data : (data.conferences || []);
-                  const processedData = validData.map((c: any) => ({ ...c, urlStatus: 'pending' as const }));
-                  
+
+                  // 過濾 NOT_FOUND URL：防止虛假或不完整連結進入結果集
+                  const cleanedData = validData.filter((c: any) =>
+                    c.url && c.url !== 'NOT_FOUND' && c.url.startsWith('http')
+                  );
+
+                  const processedData = cleanedData.map((c: any) => ({ ...c, urlStatus: 'pending' as const }));
+
                   if (processedData.length > 0) {
                     setResults(prev => {
                       const newResults = [...prev, ...processedData];
@@ -651,21 +706,21 @@ export default function App() {
                   }
                   success = true;
                 } else {
-                  throw new Error(`API returned empty result`);
+                  throw new Error('Phase B returned empty result');
                 }
               } catch (err: any) {
                 if (err.name === 'AbortError') return;
                 console.error(`Search failed for ${subField}:`, err);
-                
+
                 if (err.message && (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED'))) {
                   if (err.message.includes('配額已用盡') || err.message.includes('Daily') || err.message.includes('PerDay')) {
                     throw new Error('您的每日 AI 使用配額已用盡。請明天再試。');
                   }
-                  
+
                   let waitTime = 30000 * Math.pow(2, retryCount);
                   const match = err.message.match(/retry in ([\d.]+)s/);
                   if (match) waitTime = parseFloat(match[1]) * 1000 + 1000;
-                  
+
                   console.warn(`Quota exceeded for ${subField}. Retrying in ${waitTime/1000}s...`);
                   setSearchProgress(prev => ({ ...prev, current: `配額用盡，等待 ${Math.round(waitTime/1000)} 秒後重試...` }));
                   await sleep(waitTime);
@@ -676,9 +731,8 @@ export default function App() {
                 }
               }
             }
-            
+
             setSearchProgress(prev => ({ ...prev, completed: prev.completed + 1 }));
-            // Add a larger delay between requests to stay within free tier limits
             await sleep(3000);
           }
         };
@@ -687,6 +741,7 @@ export default function App() {
       };
 
       await processQueue(subFields, 1); // Use concurrency 1 for free tier
+
 
     } catch (err: any) {
       if (err.name === 'AbortError') {
