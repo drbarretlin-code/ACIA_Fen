@@ -560,10 +560,16 @@ export default function App() {
       const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
       // Phase 2: Queue-based Search (Reduce)
-      // ── 兩階段解耦架構 ──
-      // Phase A（googleSearch）與 Phase B（JSON Schema）必須分開呼叫。
-      // 合併呼叫時，模型會跨不同搜尋片段湊齊欄位（cross-source mapping），
-      // 導致日期/地點/截止日欄位資料來源不一致，且 URL 會被截斷或遺失。
+      // ── 三階段解耦架構 ──
+      // Phase A（googleSearch）→ groundingMetadata 提取 → Phase B（JSON Schema）
+      //
+      // 原始問題：Phase A 模型的 .text 輸出是合成文字，會跨搜尋結果混用欄位（cross-source mapping），
+      // 導致 date/location/deadline 與 originalTextQuote 的資料來源不一致。
+      //
+      // 修正方式：Phase A 完成後，從 candidates[0].groundingMetadata 提取搜尋引擎實際回傳的
+      // groundingChunks（來源 URL）與 groundingSupports（原文片段），
+      // 將這些 ground truth 傳給 Phase B 作為唯一允許的資料來源。
+      // Phase A 的 .text 僅供 Phase B 識別會議名稱與主題，不允許從中取用 date/location/deadline/url。
       const processQueue = async (items: string[], concurrency: number) => {
         const queue = [...items];
         const worker = async () => {
@@ -650,8 +656,76 @@ export default function App() {
 
                 const rawSearchText = phaseAResult.text;
 
-                // ── Phase B：從 Phase A 輸出做嚴格結構化提取，不使用任何工具 ──
-                const phaseBPrompt = `
+                // ── 從 groundingMetadata 提取搜尋引擎實際回傳的原文片段與來源 URL ──
+                // 這是防止 cross-source mapping 的關鍵：用搜尋引擎的 ground truth 取代模型的合成文字
+                const groundingMeta = (phaseAResult as any).candidates?.[0]?.groundingMetadata;
+                let groundingPassages = '';
+                if (groundingMeta?.groundingChunks && groundingMeta?.groundingSupports) {
+                  const passages: string[] = [];
+                  for (const support of groundingMeta.groundingSupports) {
+                    const chunkIndices: number[] = support.groundingChunkIndices || [];
+                    const segmentText: string = support.segment?.text || '';
+                    if (!segmentText) continue;
+                    const sources = chunkIndices
+                      .map((idx: number) => {
+                        const chunk = groundingMeta.groundingChunks[idx];
+                        if (chunk?.web) return `[${chunk.web.title || 'Unknown'}](${chunk.web.uri || ''})`;
+                        return null;
+                      })
+                      .filter(Boolean);
+                    passages.push(`來源: ${sources.join(', ') || '未知'}\n內容: ${segmentText}`);
+                  }
+                  groundingPassages = passages.join('\n---\n');
+                }
+
+                // 若無 groundingMetadata（API 版本差異或搜尋無結果），退回使用模型摘要
+                const hasGroundingData = groundingPassages.length > 0;
+
+                // ── 同時收集 groundingChunks 中的所有來源 URL，供 Phase B 優先使用 ──
+                let groundingUrls = '';
+                if (groundingMeta?.groundingChunks) {
+                  const urlList = groundingMeta.groundingChunks
+                    .filter((c: any) => c?.web?.uri)
+                    .map((c: any) => `- ${c.web.title || 'Unknown'}: ${c.web.uri}`);
+                  if (urlList.length > 0) {
+                    groundingUrls = urlList.join('\n');
+                  }
+                }
+
+                // ── Phase B：從 grounding 原文做嚴格結構化提取，不使用任何工具 ──
+                const phaseBPrompt = hasGroundingData
+                  ? `
+                  你是一個嚴格的資料結構化提取器。
+                  以下有兩組資料：
+                  1.「搜尋引擎原始片段」：搜尋引擎實際回傳的原文片段，附出處網址（Ground Truth，最高優先）。
+                  2.「模型摘要」：AI 根據搜尋結果產出的會議資訊摘要（僅供輔助識別會議名稱與主題，不可從中取用 date/location/deadline/url）。
+
+                  ===搜尋引擎原始片段（Ground Truth，唯一允許的資料欄位來源）===
+                  ${groundingPassages}
+                  ===結束===
+
+                  ===搜尋引擎來源 URL 清單===
+                  ${groundingUrls || '（無可用 URL）'}
+                  ===結束===
+
+                  ===模型摘要（僅供識別會議名稱與主題，禁止從中取用 date/location/deadline/url）===
+                  ${rawSearchText}
+                  ===結束===
+
+                  提取規則（違反任何一條視為錯誤輸出）：
+                  1. 每一筆會議的 date、location、deadline 欄位，必須且只能從「搜尋引擎原始片段」中提取原文。禁止從「模型摘要」取用這三個欄位。
+                  2. 每一筆會議的所有欄位（date、location、deadline、url）必須來自同一個「搜尋引擎原始片段」區塊，嚴禁跨區塊混用。
+                  3. date 欄位：填入該片段中明確出現的舉辦日期原文（例如："July 10–12, 2025"）。若片段中未出現，填「資訊未提供」。
+                  4. location 欄位：填入該片段中明確出現的地點原文。若片段中未出現，填「資訊未提供」。
+                  5. deadline 欄位：填入該片段中明確出現的投稿截止日原文。若片段中未出現，填「資訊未提供」。
+                  6. url 欄位：優先使用「搜尋引擎來源 URL 清單」中與該會議對應的完整 URL。若無，填「NOT_FOUND」。禁止組合或推測網址。
+                  7. originalTextQuote：直接複製該筆會議所對應的「搜尋引擎原始片段」原文（字元數不超過 200）。
+                  8. urlSource：填入該 URL 所來自的搜尋結果標題或網域。
+                  9. theme 與 topics 可參考「模型摘要」輔助辨識。
+                  10. 若某欄位在原始片段中完全找不到對應，填「資訊未提供」。
+                  11. 輸出為 JSON 陣列格式。
+                `
+                  : `
                   你是一個嚴格的資料結構化提取器。
                   以下是已從搜尋引擎取得的學術會議原始資訊，請從中提取結構化資料。
 
