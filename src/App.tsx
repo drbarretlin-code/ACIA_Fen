@@ -28,7 +28,8 @@ interface Conference {
   predatoryAnalysis: string;
   url: string;
   originalTextQuote: string;
-  urlStatus?: 'pending' | 'valid' | 'invalid' | 'fixing';
+  urlSource?: string;  // 搜尋來源說明（標題或網域）
+  urlStatus?: 'pending' | 'valid' | 'unverified' | 'invalid' | 'fixing';
   lat?: number;
   lng?: number;
 }
@@ -695,14 +696,19 @@ export default function App() {
                     c.url && c.url !== 'NOT_FOUND' && c.url.startsWith('http')
                   );
 
+                  // NOT_FOUND 的筆數仍保留但標記 invalid（完全無法追溯來源）
+                  const notFoundData = validData.filter((c: any) =>
+                    !c.url || c.url === 'NOT_FOUND' || !c.url.startsWith('http')
+                  ).map((c: any) => ({ ...c, url: '', urlStatus: 'invalid' as const }));
+
                   const processedData = cleanedData.map((c: any) => ({ ...c, urlStatus: 'pending' as const }));
 
-                  if (processedData.length > 0) {
+                  if (processedData.length > 0 || notFoundData.length > 0) {
                     setResults(prev => {
-                      const newResults = [...prev, ...processedData];
+                      const newResults = [...prev, ...processedData, ...notFoundData.filter((c: any) => c.theme)];
                       return Array.from(new Map(newResults.map(item => [item.theme, item])).values());
                     });
-                    verifyLinks(processedData);
+                    if (processedData.length > 0) verifyLinks(processedData);
                   }
                   success = true;
                 } else {
@@ -764,7 +770,8 @@ export default function App() {
     }
   };
 
-  // verifyLinks: 僅依賴後端 HTTP 驗證，不再使用無搜尋工具的 AI 猜測
+  // verifyLinks: 後端 HTTP 驗證（寬鬆模式）
+  // 驗證失敗分兩層：後端不可達 → unverified（保留連結可點）；fixLink 也失敗 → unverified（有 urlSource 時）或 invalid（無任何來源）
   const verifyLinks = async (conferences: Conference[]) => {
     const urls = conferences.map(c => c.url);
     try {
@@ -779,12 +786,12 @@ export default function App() {
         for (const c of conferences) {
           const isReachable = resultsMap[c.url];
           if (isReachable) {
-            // HTTP 可連通 → 標記為有效，不再用 AI 猜內容
+            // HTTP 可連通 → 標記為有效
             setResults(prev => prev.map(item =>
               item.theme === c.theme ? { ...item, urlStatus: 'valid' as const } : item
             ));
           } else {
-            // HTTP 不可連通 → 標記 fixing 狀態後執行自動修復
+            // HTTP 不可連通 → 先標記 fixing 嘗試修復
             setResults(prev => prev.map(item =>
               item.theme === c.theme ? { ...item, urlStatus: 'fixing' as const } : item
             ));
@@ -792,16 +799,22 @@ export default function App() {
           }
         }
       } else {
-        // 後端驗證服務不可用時，統一標記為 pending（保留連結可點擊）
-        console.warn('verify-links service unavailable, skipping validation');
+        // 後端驗證服務不可用 → 標記為 unverified（保留連結可點擊，加警示）
+        console.warn('verify-links service unavailable, marking as unverified');
         setResults(prev => prev.map(item =>
           conferences.some(c => c.theme === item.theme)
-            ? { ...item, urlStatus: 'pending' as const }
+            ? { ...item, urlStatus: 'unverified' as const }
             : item
         ));
       }
     } catch (e) {
+      // 網路錯誤 → 同樣標記 unverified
       console.error('Link verification failed', e);
+      setResults(prev => prev.map(item =>
+        conferences.some(c => c.theme === item.theme)
+          ? { ...item, urlStatus: 'unverified' as const }
+          : item
+      ));
     }
   };
 
@@ -855,7 +868,7 @@ export default function App() {
               return;
             }
           } else {
-            // AI 沒有找到不同的 URL
+            // AI 沒有找到不同的 URL → 退回 unverified（原 URL 有 urlSource 時保留）
             break;
           }
         } else {
@@ -874,9 +887,12 @@ export default function App() {
       }
     }
 
-    // 三次重試失敗 → 確認為無效，不保留虛構連結
+    // 三次重試失敗：若有 urlSource 來源說明 → unverified（保留連結可點，加警示）
+    // 若完全無任何來源追溯 → invalid
     setResults(prev => prev.map(c =>
-      c.theme === conference.theme ? { ...c, urlStatus: 'invalid' as const } : c
+      c.theme === conference.theme
+        ? { ...c, urlStatus: c.urlSource ? 'unverified' as const : 'invalid' as const }
+        : c
     ));
   };
 
@@ -1235,16 +1251,18 @@ export default function App() {
                               {conf.urlStatus === 'valid' && <CheckSquare size={14} className="text-emerald-500 dark:text-emerald-400" />}
                               {conf.urlStatus === 'invalid' && <AlertTriangle size={14} className="text-red-500 dark:text-red-400" />}
                               {conf.urlStatus === 'fixing' && <RefreshCw size={14} className="text-amber-500 dark:text-amber-400 animate-spin" />}
+                              {conf.urlStatus === 'unverified' && <AlertTriangle size={14} className="text-amber-500 dark:text-amber-400" />}
 
                               {conf.urlStatus === 'invalid' ? (
-                                // invalid 狀態：不渲染可點擊連結，避免使用者點到虛假 URL
+                                // invalid 狀態：完全無法追溯來源，不渲染可點擊連結
                                 <span className="text-xs text-red-500 dark:text-red-400 font-medium">
-                                  無法確認官方連結
+                                  無法取得官方連結
                                 </span>
                               ) : (
                                 <a href={conf.url} target="_blank" rel="noreferrer" className={cn(
                                   "text-xs font-mono truncate max-w-[200px] hover:underline flex items-center gap-1",
                                   conf.urlStatus === 'valid' ? "text-blue-600 dark:text-blue-400" :
+                                  conf.urlStatus === 'unverified' ? "text-amber-600 dark:text-amber-400" :
                                   conf.urlStatus === 'fixing' ? "text-amber-600 dark:text-amber-400" : "text-slate-500 dark:text-slate-400"
                                 )}>
                                   <LinkIcon size={12} />
@@ -1259,6 +1277,19 @@ export default function App() {
                                 回報錯誤
                               </button>
                             </div>
+                            {/* unverified 警示說明 */}
+                            {conf.urlStatus === 'unverified' && (
+                              <div className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded px-2 py-1">
+                                連結未經伺服器驗證，請自行確認官方網址
+                              </div>
+                            )}
+                            {/* 來源追溯：urlSource */}
+                            {conf.urlSource && (
+                              <div className="text-[10px] text-slate-400 dark:text-slate-500 flex items-center gap-1">
+                                <Globe size={10} />
+                                來源：{conf.urlSource}
+                              </div>
+                            )}
                             <div className="text-[10px] text-slate-500 dark:text-slate-600 font-mono border-l-2 border-slate-300 dark:border-slate-700 pl-2 italic">
                               「{conf.originalTextQuote}」
                             </div>
