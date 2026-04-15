@@ -1009,8 +1009,21 @@ export default function App() {
       <header className="border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm sticky top-0 z-10 no-print">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
-              <Globe className="text-white" size={20} />
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center shadow-lg" style={{background: 'linear-gradient(135deg, #1a73e8, #34a853)'}}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="12" cy="12" r="10" fill="#4FC3F7"/>
+                <ellipse cx="12" cy="12" rx="10" ry="10" fill="url(#earthGrad)"/>
+                <path d="M6 4c1 2 0 4 2 5s4-1 3 2-3 3-1 5 4 1 5 3" fill="#66BB6A" opacity="0.9"/>
+                <path d="M14 3c1 1 3 2 3 4s-1 3 1 4 3 0 2 3" fill="#43A047" opacity="0.85"/>
+                <path d="M3 10c1-1 2 0 3 1s0 3 2 3 2-2 3-1 0 3-1 4" fill="#81C784" opacity="0.8"/>
+                <circle cx="12" cy="12" r="10" fill="none" stroke="white" strokeWidth="0.5" opacity="0.3"/>
+                <defs>
+                  <radialGradient id="earthGrad" cx="0.3" cy="0.3" r="0.7">
+                    <stop offset="0%" stopColor="#81D4FA"/>
+                    <stop offset="100%" stopColor="#1565C0"/>
+                  </radialGradient>
+                </defs>
+              </svg>
             </div>
             <div>
               <h1 className="text-lg font-medium text-slate-900 dark:text-white tracking-wide">國際學術會議搜尋系統</h1>
