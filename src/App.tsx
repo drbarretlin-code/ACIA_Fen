@@ -771,13 +771,17 @@ ${structuredSources || '（無結構化資料源，請退回判定為 UNKNOWN）
                     };
                   });
 
+                  // ── 資料檢查：過濾掉沒有會議主題的幽靈資料 ──
+                  // 因 Adapter 會將 UNKNOWN 轉為「資訊未提供」字串（truthy），必須明確過濾
+                  const validConferences = validData.filter((c: any) => c.theme && c.theme !== '資訊未提供');
+
                   // 過濾 NOT_FOUND URL：防止虛假或不完整連結進入結果集
-                  const cleanedData = validData.filter((c: any) =>
+                  const cleanedData = validConferences.filter((c: any) =>
                     c.url && c.url !== 'NOT_FOUND' && c.url.startsWith('http')
                   );
 
                   // NOT_FOUND 的筆數仍保留但標記 invalid（完全無法追溯來源）
-                  const notFoundData = validData.filter((c: any) =>
+                  const notFoundData = validConferences.filter((c: any) =>
                     !c.url || c.url === 'NOT_FOUND' || !c.url.startsWith('http')
                   ).map((c: any) => ({ ...c, url: '', urlStatus: 'invalid' as const }));
 
@@ -785,7 +789,7 @@ ${structuredSources || '（無結構化資料源，請退回判定為 UNKNOWN）
 
                   if (processedData.length > 0 || notFoundData.length > 0) {
                     setResults(prev => {
-                      const newResults = [...prev, ...processedData, ...notFoundData.filter((c: any) => c.theme)];
+                      const newResults = [...prev, ...processedData, ...notFoundData];
                       return Array.from(new Map(newResults.map(item => [item.theme, item])).values());
                     });
                     if (processedData.length > 0) verifyLinks(processedData);
