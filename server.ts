@@ -286,9 +286,8 @@ async function runSubscriptionSearch(sub: any) {
   }
 }
 
-// Setup Cron Job (Runs every day at 8:00 AM)
-cron.schedule('0 8 * * *', async () => {
-  console.log('[Cron] Running daily subscription check...');
+// Setup Cron Job (Runs every minute to check schedule)
+cron.schedule('* * * * *', async () => {
   if (!db) {
     console.error('[Cron] Firestore not initialized');
     return;
@@ -297,17 +296,40 @@ cron.schedule('0 8 * * *', async () => {
   try {
     const snapshot = await db.collection('subscriptions').where('isActive', '==', true).get();
     const subs = snapshot.docs;
-    console.log(`[Cron] Found ${subs.length} active subscriptions`);
+
+    const isoStringTaipei = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Taipei", hour12: false }); 
+    // sv-SE gives YYYY-MM-DD HH:mm:ss format
+    const currentHHmm = isoStringTaipei.substring(11, 16);
+    const taipeiDate = new Date(isoStringTaipei.replace(' ', 'T') + '+08:00');
+    const currentDay = taipeiDate.getDay();
+    const currentDate = taipeiDate.getDate();
 
     for (const doc of subs) {
       const sub = doc.data();
-      // Run sequentially to avoid hitting rate limits too hard
+
+      if (sub.subscriptionEndDate) {
+        const endDate = new Date(sub.subscriptionEndDate + 'T23:59:59+08:00');
+        if (taipeiDate > endDate) {
+          await doc.ref.update({ isActive: false });
+          continue;
+        }
+      }
+
+      if (sub.sendTime !== currentHHmm) {
+        continue;
+      }
+
+      if (sub.frequency === 'weekly' && currentDay !== 1) { // 預設週一發送
+        continue;
+      }
+      if (sub.frequency === 'monthly' && currentDate !== 1) { // 預設每月一號發送
+        continue;
+      }
+
+      console.log(`[Cron] Triggering subscription: ${sub.name}`);
       await runSubscriptionSearch(sub);
-      
-      // Update lastRun
       await doc.ref.update({ lastRun: admin.firestore.FieldValue.serverTimestamp() });
     }
-    console.log('[Cron] Daily subscription check completed');
   } catch (error) {
     console.error('[Cron] Error fetching subscriptions:', error);
   }
